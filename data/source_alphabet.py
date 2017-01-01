@@ -6,22 +6,31 @@
 #
 # Removed the 'continuous' mode as it was unnecessary
 #  for the GMSK investigation and relied on several out
-#  of tree GNU Radio Blocks that were annoying to install
+#  of tree GNU Radio Blocks that were annoying to install.
+#
+# Also added another constructor parameter. The GNU Radio
+#  gmsk_mod block already contains functionality that mimics
+#  the blocks.packed_to_unpacked_bb behavior. to avoid a
+#  double unpacking situation the unpacking here can be
+#  bypassed.
 
 from gnuradio import gr, blocks
 import numpy as np
 import sys
 
 class source_alphabet(gr.hier_block2):
-    def __init__(self, dtype="discrete", limit=10000, randomize=False):
+    def __init__(self, dtype="discrete", limit=10000, unpack_bytes=False, randomize=False):
         if(dtype == "discrete"):
             gr.hier_block2.__init__(self, "source_alphabet",
                 gr.io_signature(0,0,0),
                 gr.io_signature(1,1,gr.sizeof_char))
 
             self.src = blocks.file_source(gr.sizeof_char, "source_material/gutenberg_shakespeare.txt")
-            self.convert = blocks.packed_to_unpacked_bb(1, gr.GR_LSB_FIRST);
-            #self.convert = blocks.packed_to_unpacked_bb(8, gr.GR_LSB_FIRST);
+
+            if unpack_bytes:
+                self.convert = blocks.packed_to_unpacked_bb(1, gr.GR_LSB_FIRST)
+            else:
+                self.convert = blocks.packed_to_unpacked_bb(8, gr.GR_LSB_FIRST)
             self.limit = blocks.head(gr.sizeof_char, limit)
             self.connect(self.src,self.convert)
             last = self.convert
@@ -56,4 +65,3 @@ if __name__ == "__main__":
     src = source_alphabet("discrete", 1000)
     snk = blocks.vector_sink_b()
     tb.run()
-

@@ -6,6 +6,7 @@ import cmath
 from source_alphabet import source_alphabet
 from gnuradio import channels, digital, gr, blocks
 import math
+import matplotlib.pyplot as plt
 import numpy as np
 import numpy.fft, cPickle, gzip
 import logging
@@ -14,9 +15,12 @@ import sys
 
 
 # define utility function(s)
-def create_unit_vector(complex_num):
+def create_unit_vector(complex_num, iq_swap=False):
     magnitude = math.sqrt(np.real(complex_num) ** 2 + np.imag(complex_num) ** 2)
-    return (np.real(complex_num) / magnitude, np.imag(complex_num) / magnitude)
+    if iq_swap == False:
+        return (np.real(complex_num) / magnitude, np.imag(complex_num) / magnitude)
+    else:
+        return (np.imag(complex_num) / magnitude, np.real(complex_num) / magnitude)
 
 
 # define constants for data parsing
@@ -41,7 +45,7 @@ DEFAULT_VECTOR_LENGTH_IN_SYMBOLS = DEFAULT_SYMBOLS_PER_BURST * 3
 DEFAULT_KNOWN_SYMBOLS_PER_BURST = 26
 DEFAULT_NUM_IQ_VECTORS = 4096
 
-DEFAULT_MINIMUM_SNR_VALUE = -20
+DEFAULT_MINIMUM_SNR_VALUE = 0
 DEFAULT_MAXIMUM_SNR_VALUE = 20
 SNR_VALUE_STEP_SIZE = 2
 
@@ -201,64 +205,6 @@ logging.info("Generating vectors over SNR range [%u,%u]" % (args.minimum_snr, ar
 num_symbols_to_generate = int(1e6)
 
 
-########################################
-# Get the original (unmodulated) symbol vector
-########################################
-
-# define GNU Radio blocks to generate the original (unmodulated) symbol vector.
-#  note that here we want the source_alphabet block to unpack the data so that
-#  each element in the resulting vector represents a single symbol.
-source_block = source_alphabet('discrete', num_symbols_to_generate, True, False)
-symbol_vals_sink = blocks.vector_sink_b()
-symbol_vals_top_block = gr.top_block()
-
-# connect the blocks into an 'assembly'
-symbol_vals_top_block.connect(source_block, symbol_vals_sink)
-
-# run the 'assembly' to generate data
-symbol_vals_top_block.run()
-
-# convert the data into a numpy array
-original_symbol_vector = np.array(symbol_vals_sink.data(), dtype=np.int8)
-
-# in order to facilitate soft symbol predictions from a neural network, change
-#  all of the '0' values into '-1' values.
-for i in range(len(original_symbol_vector)):
-    if original_symbol_vector[i] == 0:
-        original_symbol_vector[i] = -1
-
-logging.info("Generated %u unmodulated symbols" %
-    (len(original_symbol_vector)))
-
-
-########################################
-# Get the cleanly modulated vector (ideal conditions)
-########################################
-
-# define GNU Radio blocks to generate the basic, cleanly modulated vector. note
-#  that the num_symbols_to_generate is divided by 8 here because the source_alphabet
-#  block is NOT unpacking the char stream it receives. therefore, there are
-#  eight symbols in each element that it sends to the gmsk_mod block. these are
-#  unpacked in the gmsk_mod block and processed individually.
-source_block = source_alphabet('discrete', num_symbols_to_generate / 8, False, False)
-gmsk_mod_block = digital.gmsk_mod(args.samples_per_symbol)
-modulated_sink_block = blocks.vector_sink_c()
-common_modulation_top_block = gr.top_block()
-
-# connect the blocks into an 'assembly'
-common_modulation_top_block.connect(source_block, gmsk_mod_block, modulated_sink_block)
-
-# run the 'assembly' to generate data
-common_modulation_top_block.run()
-
-# convert the data into a numpy array
-original_modulation_vector = np.array(modulated_sink_block.data(), dtype=np.complex64)
-logging.info("Generated %u ideally modulated IQ samples; using %u samples per symbol" %
-    (len(original_modulation_vector), len(original_modulation_vector) / num_symbols_to_generate))
-
-logging.info("Finished generating reference data; moving on to dynamic channel simulation")
-
-
 # now apply various dynamic channel effects; repeat at each SNR value
 for snr in snr_vals:
 
@@ -271,17 +217,31 @@ for snr in snr_vals:
     insufficient_snr_vectors = True
     while insufficient_snr_vectors:
 
-        # reset the source block. note that the num_symbols_to_generate is
+        # create the source block. note that the num_symbols_to_generate is
         #  divided by 8 here because the source_alphabet block is NOT unpacking
         #  the char stream it receives. therefore, there are eight symbols in
         #  each element that it sends to the gmsk_mod block. these are unpacked
         #  in the gmsk_mod block and processed individually.
         snr_source_block = source_alphabet('discrete', num_symbols_to_generate / 8, False, False)
 
-        # reset the gmsk modulation block
+        # create a conversion block and a sink for raw symbol data; this allows
+        #  us to tap off the symbol data before it is passed to the modulator.
+        symbol_conversion_block = blocks.packed_to_unpacked_bb(1, gr.GR_LSB_FIRST)
+        symbol_vals_sink = blocks.vector_sink_b()
+
+        # create the gmsk modulation block
         snr_gmsk_mod_block = digital.gmsk_mod(args.samples_per_symbol)
 
+        # create a sink block for the cleanly modulated data
+        modulated_sink_block = blocks.vector_sink_c()
+
         # define the channel model parameters
+        sample_rate_offset_std_dev = 0.01
+        sample_rate_offset_max_dev = 50
+
+        carrier_freq_offset_std_dev = 0.01
+        carrier_freq_offset_max_dev = 0.5e3
+
         fD = 1
         delays = [0.0, 0.9, 1.7]
         mags = [1, 0.8, 0.3]
@@ -289,33 +249,77 @@ for snr in snr_vals:
         noise_amp = 10**(-snr/10.0)
 
         # create the GNU Radio channel model block
-        channel_model_block = channels.dynamic_channel_model( 200e3, 0.01, 50, 0.01, 0.5e3, 8, \
+        channel_model_block = channels.dynamic_channel_model( 200e3,
+                                                              sample_rate_offset_std_dev,
+                                                              sample_rate_offset_max_dev,
+                                                              carrier_freq_offset_std_dev,
+                                                              carrier_freq_offset_max_dev,
+                                                              8, \
                                                               fD, True, 4, delays, mags, \
                                                               n_filter_taps, noise_amp, 0x1337 )
 
-        # create a sink block
+        # create a sink block for the signal as transmitted through the channel
         channel_sink_block = blocks.vector_sink_c()
 
         # create the top-level GNU Radio block
         top_block = gr.top_block()
 
-        # connect the blocks. note that is very inefficient to redo the GMSK
-        #  demodulation that we already did to get the unmodified modulation
-        #  data, but it's easier this way and it's only a penalty during
-        #  dataset generation, so...
+        # connect the various blocks
+
+        # start by connecting the source, symbol sink path, modulator, and
+        #  modulator sink blocks
+        top_block.connect(snr_source_block, snr_gmsk_mod_block)
+        top_block.connect(snr_source_block, symbol_conversion_block, symbol_vals_sink)
+        top_block.connect(snr_gmsk_mod_block, modulated_sink_block)
+
+        # next, connect blocks based on the command-line settings
         if args.channel_model != PASSTHROUGH_CHANNEL_MODEL_STR:
             logging.debug("Using a dynamic channel model")
-            top_block.connect(snr_source_block, snr_gmsk_mod_block, channel_model_block, channel_sink_block)
+
+            # provides IQ data as transmitted through the channel
+            top_block.connect(snr_gmsk_mod_block, channel_model_block, channel_sink_block)
+
         else:
             logging.debug("Using a pass-through channel model")
-            top_block.connect(snr_source_block, snr_gmsk_mod_block, channel_sink_block)
+
+            # provides the modulated IQ data; repeat of the tap off into the
+            #  modulated_sink_block.
+            top_block.connect(snr_gmsk_mod_block, channel_sink_block)
 
         # run the GNU Radio 'assembly'
         top_block.run()
 
-        # get the raw output after the 'assembly' finishes
-        dynamic_channel_output_vector = np.array(channel_sink_block.data(), dtype=np.complex64)
 
+        ########################################
+        # get the REFERNCE SYMBOL data
+        ########################################
+
+        original_symbol_vector = np.array(symbol_vals_sink.data(), dtype=np.int8)
+
+        # in order to facilitate soft symbol predictions from a neural network, change
+        #  all of the '0' values into '-1' values.
+        for i in range(len(original_symbol_vector)):
+            if original_symbol_vector[i] == 0:
+                original_symbol_vector[i] = -1
+
+        logging.info("Generated %u unmodulated symbols" %
+            (len(original_symbol_vector)))
+
+
+        ########################################
+        # get the REFERENCE IQ data
+        ########################################
+
+        original_modulation_vector = np.array(modulated_sink_block.data(), dtype=np.complex64)
+        logging.info("Generated %u ideally modulated IQ samples; using %u samples per symbol" %
+            (len(original_modulation_vector), len(original_modulation_vector) / num_symbols_to_generate))
+
+
+        ########################################
+        # get the DYNAMIC IQ data
+        ########################################
+
+        dynamic_channel_output_vector = np.array(channel_sink_block.data(), dtype=np.complex64)
         logging.info("Generated new dynamic channel dataset (%u samples); starting to extract test vectors" % \
             (len(dynamic_channel_output_vector)))
 
@@ -360,16 +364,56 @@ for snr in snr_vals:
                           'data':np.zeros([5, IQ_VECTOR_LENGTH], dtype=np.float32),
                           'prediction':np.zeros([1 * args.symbols_per_burst], dtype=np.int8)}
 
-            # convert each IQ sample to a unit vector
-            for i in range(len(sampled_vector)):
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                # convert each IQ sample to a unit vector
+                for i in range(len(sampled_vector)):
+
+                    x1, y1, x2, y2, x3, y3 = [], [], [], [], [], []
+                    for j in range(args.samples_per_symbol * 80):
+                        # get the original vector
+                        real, imag = create_unit_vector(original_vector[j])
+                        x1.append(real)
+                        y1.append(imag)
+
+                        # get the version that has been converted to a unit vector
+                        if args.channel_model != PASSTHROUGH_CHANNEL_MODEL_STR:
+                            real, imag = create_unit_vector(sampled_vector[j], True)
+                            x3.append(real * -1)
+                            y3.append(imag)
+                        else:
+                            real, imag = create_unit_vector(sampled_vector[j], False)
+                            x3.append(real)
+                            y3.append(imag)
+
+                    plt.figure(1)
+                    plt.subplot(411)
+                    plt.plot(x1)
+                    plt.grid(True)
+                    plt.subplot(412)
+                    plt.plot(y1)
+                    plt.grid(True)
+
+                    plt.subplot(413)
+                    plt.plot(x3)
+                    plt.grid(True)
+                    plt.subplot(414)
+                    plt.plot(y3)
+                    plt.grid(True)
+
+                    plt.show()
+                    sys.exit(0)
 
                 # convert the original and sampled data to unit vectors; this
-                #  is providing a data regularization function.
+                #  is providing a data regularization function. Note that based
+                #  on empirical observation it is necessary to do an IQ swap
+                #  on the sampled data.
                 original_i, original_q = create_unit_vector(original_vector[i])
-                sampled_i, sampled_q = create_unit_vector(sampled_vector[i])
+                sampled_i, sampled_q = create_unit_vector(sampled_vector[i], True)
 
-                # save the measured data into the 'data' vector
-                cur_output['data'][SAMPLED_IQ_I_IDX][i] = sampled_i
+                # save the sampled data into the 'data' vector. Note that based
+                #  on empirical observation it is necessary to reverse the sign
+                #  on the I data so that the saved data matches the original IQ
+                cur_output['data'][SAMPLED_IQ_I_IDX][i] = sampled_i * -1
                 cur_output['data'][SAMPLED_IQ_Q_IDX][i] = sampled_q
 
                 # is this one of the samples that has an a priori known value? if so, then
@@ -407,6 +451,8 @@ for snr in snr_vals:
     for data in snr_generated_dataset:
         generated_dataset['data'].append(data)
 
+# shuffle the dataset
+random.shuffle(generated_dataset['data'])
 
 logging.info("Dataset generation is complete; writing to disk (%s)..." % (args.output_file))
 cPickle.dump( generated_dataset, file(args.output_file, "wb" ) )

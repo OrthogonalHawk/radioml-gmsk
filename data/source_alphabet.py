@@ -61,7 +61,7 @@ class source_alphabet(gr.hier_block2):
                 # on each use update the idx, but make sure it does not
                 #  increment too far
                 source_alphabet.CUR_SOURCE_FILE_IDX += 1
-                source_alphabet.CUR_SOURCE_FILE_IDX % len(source_alphabet.SOURCE_FILES)
+                source_alphabet.CUR_SOURCE_FILE_IDX %= len(source_alphabet.SOURCE_FILES)
             else:
                 self.src = blocks.file_source(gr.sizeof_char, source_alphabet.MASTER_SOURCE_FILE)
 

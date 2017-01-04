@@ -24,7 +24,7 @@ def create_unit_vector(complex_num, iq_swap=False):
 
 
 # define constants for data parsing
-DYNAMIC_CHANNEL_SETTLING_TIME_IN_SAMPLES = 10000
+DYNAMIC_CHANNEL_SETTLING_TIME_IN_SAMPLES = 1000
 
 # define constants/defaults for the command-line parser
 DESCRIPTION = "Generate a series of IQ vectors that represent GMSK signal(s) in a dynamic" + \
@@ -202,7 +202,7 @@ logging.info("Generating vectors over SNR range [%u,%u]" % (args.minimum_snr, ar
 
 # the source data is common across all SNR values and dynamic channel effects; start
 #  by using GNU Radio to generate the reference data.
-num_symbols_to_generate = int(1e6)
+num_symbols_to_generate = int(1e5)
 
 
 # now apply various dynamic channel effects; repeat at each SNR value
@@ -222,7 +222,7 @@ for snr in snr_vals:
         #  the char stream it receives. therefore, there are eight symbols in
         #  each element that it sends to the gmsk_mod block. these are unpacked
         #  in the gmsk_mod block and processed individually.
-        snr_source_block = source_alphabet('discrete', num_symbols_to_generate / 8, False, False)
+        snr_source_block = source_alphabet('discrete', num_symbols_to_generate / 8, False, True)
 
         # create a conversion block and a sink for raw symbol data; this allows
         #  us to tap off the symbol data before it is passed to the modulator.
@@ -236,13 +236,14 @@ for snr in snr_vals:
         modulated_sink_block = blocks.vector_sink_c()
 
         # define the channel model parameters
-        sample_rate_offset_std_dev = 0.01
-        sample_rate_offset_max_dev = 50
+        sample_rate_offset_std_dev = 0.01 # 0.01
+        sample_rate_offset_max_dev = 0    # 50
 
         carrier_freq_offset_std_dev = 0.01
-        carrier_freq_offset_max_dev = 0.5e3
+        carrier_freq_offset_max_dev = 0 # 0.5e3
 
-        fD = 1
+        doppler_frequency = 0
+
         delays = [0.0, 0.9, 1.7]
         mags = [1, 0.8, 0.3]
         n_filter_taps = 8
@@ -254,8 +255,9 @@ for snr in snr_vals:
                                                               sample_rate_offset_max_dev,
                                                               carrier_freq_offset_std_dev,
                                                               carrier_freq_offset_max_dev,
-                                                              8, \
-                                                              fD, True, 4, delays, mags, \
+                                                              8,
+                                                              doppler_frequency,
+                                                              True, 8, delays, mags, \
                                                               n_filter_taps, noise_amp, 0x1337 )
 
         # create a sink block for the signal as transmitted through the channel
@@ -331,7 +333,7 @@ for snr in snr_vals:
 
         # we want to sample from the generated data stream some random time after the channel
         #  model transients have settled. values chosen here are arbitrary.
-        sample_index = random.randint(5000, DYNAMIC_CHANNEL_SETTLING_TIME_IN_SAMPLES)
+        sample_index = random.randint(50, DYNAMIC_CHANNEL_SETTLING_TIME_IN_SAMPLES)
 
         # make sure that the sample index is on a symbol boundary
         if sample_index % args.samples_per_symbol != 0:
@@ -341,6 +343,7 @@ for snr in snr_vals:
         if sample_index % args.samples_per_symbol != 0:
             logging.error("Sample index is NOT on a symbol boundary!!!")
             sys.exit(-1)
+
 
         while (sample_index + IQ_VECTOR_LENGTH) < len(dynamic_channel_output_vector) and \
               (sample_index + IQ_VECTOR_LENGTH) < len(original_modulation_vector) and \
